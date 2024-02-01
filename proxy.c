@@ -18,7 +18,6 @@
 #include "pass.h"
 #include <openssl/err.h>
 #include <openssl/bio.h>
-#include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
@@ -46,8 +45,10 @@ void generateOpenSSLConfig(char* d1,const unsigned char * d2,const unsigned char
     fprintf(configFile, "subjectAltName = @alt_names\n");
     fprintf(configFile, "[alt_names]\n");
     int i = 1;
-    if(d1 != NULL)
+    if(d1 != NULL){
+    	printf("d1 - %s\n",d1);
     	fprintf(configFile, "DNS.%d = %s\n",i++, d1);
+    }
     if(d2 != NULL)
         fprintf(configFile, "DNS.%d = %s\n",i++, d2);
     if(d3 != NULL)
@@ -75,6 +76,7 @@ void extractSANandCN(SSL* ssl,char* d1) {
             GENERAL_NAME* san = sk_GENERAL_NAME_value(san_names, i);
             if (san->type == GEN_DNS) {
                 d2 = ASN1_STRING_get0_data(san->d.dNSName);
+                printf("d2 - %s\n",d2);
             }
         }
         sk_GENERAL_NAME_free(san_names);
@@ -91,6 +93,7 @@ void extractSANandCN(SSL* ssl,char* d1) {
                 ASN1_STRING* common_name_asn1 = X509_NAME_ENTRY_get_data(common_name_entry);
                 if (common_name_asn1) {
                     d3 = ASN1_STRING_get0_data(common_name_asn1);
+                    printf("d3 - %s\n",d3);
                 }
             }
         }
@@ -382,7 +385,9 @@ void proxy_server_handler(int connfd){
 		exit(0);
 	    }
 	    
-	    extern char password[20];
+	    
+	    
+	   extern char password[20];
 	   char *domain = host;
 	    
 	   extractSANandCN(destination_ssl,domain);
