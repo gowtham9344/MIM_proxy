@@ -21,8 +21,6 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
-
-
 #define SA struct sockaddr 
 #define BACKLOG 10 
 #define PORT "8080"
@@ -31,7 +29,7 @@
 SSL_CTX* ctx;
 SSL_CTX* ctx1;
 //it helps us to handle all the dead process which was created with the fork system call.
-void generateOpenSSLConfig(char* d1,const unsigned char * d2,const unsigned char * d3) {
+void generateOpenSSLConfig(const unsigned char** names,int n) {
     FILE *configFile = fopen("openssl_config.conf", "w");
     
     if (configFile == NULL) {
@@ -45,28 +43,24 @@ void generateOpenSSLConfig(char* d1,const unsigned char * d2,const unsigned char
     fprintf(configFile, "subjectAltName = @alt_names\n");
     fprintf(configFile, "[alt_names]\n");
     int i = 1;
-    if(d1 != NULL){
-    	printf("d1 - %s\n",d1);
-    	fprintf(configFile, "DNS.%d = %s\n",i++, d1);
+    while(n--){
+	    if(names[n] != NULL){
+	    	printf("names[%d] - %s\n",n,names[n]);
+	    	fprintf(configFile, "DNS.%d = %s\n",i++, names[n]);
+	    }
     }
-    if(d2 != NULL)
-        fprintf(configFile, "DNS.%d = %s\n",i++, d2);
-    if(d3 != NULL)
-	fprintf(configFile, "DNS.%d = %s\n",i++, d3);
 
     fclose(configFile);
 }
 
 // Function to extract SAN and CN from the server certificate
-void extractSANandCN(SSL* ssl,char* d1) {
+void extractSANandCN(SSL* ssl,const unsigned char** names,int n) {
         // Get the server's certificate
     X509* cert = SSL_get_peer_certificate(ssl);
     if (!cert) {
         // Handle error, certificate not available
         return;
     }
-    const unsigned char* d2;
-    const unsigned char* d3;
 
     // Extract Subject Alternative Name (SAN)
     STACK_OF(GENERAL_NAME)* san_names = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
@@ -75,8 +69,7 @@ void extractSANandCN(SSL* ssl,char* d1) {
         for (int i = 0; i < count; ++i) {
             GENERAL_NAME* san = sk_GENERAL_NAME_value(san_names, i);
             if (san->type == GEN_DNS) {
-                d2 = ASN1_STRING_get0_data(san->d.dNSName);
-                printf("d2 - %s\n",d2);
+                names[n++] = ASN1_STRING_get0_data(san->d.dNSName);
             }
         }
         sk_GENERAL_NAME_free(san_names);
@@ -92,14 +85,13 @@ void extractSANandCN(SSL* ssl,char* d1) {
             if (common_name_entry) {
                 ASN1_STRING* common_name_asn1 = X509_NAME_ENTRY_get_data(common_name_entry);
                 if (common_name_asn1) {
-                    d3 = ASN1_STRING_get0_data(common_name_asn1);
-                    printf("d3 - %s\n",d3);
+                    names[n++] = ASN1_STRING_get0_data(common_name_asn1);
                 }
             }
         }
     }
 
-    generateOpenSSLConfig(d1,d2,d3);
+    generateOpenSSLConfig(names,n);
     // Cleanup
     X509_free(cert);
 }
@@ -137,6 +129,7 @@ void create_SSL_context(char* cert) {
         exit(0);
     }
 }
+
 void create_SSL_context_client() {
     // Initialize OpenSSL
     SSL_library_init();
@@ -327,7 +320,7 @@ void message_handler_http(int client_socket,int destination_socket,char data[]){
 //simple webserver with support to http methods such as get as well as post (basic functionalities)
 void proxy_server_handler(int connfd){
 	int c = 0;
-	char buff[2048],data[2048];
+	char buff[2048],data[2048],resend[2048];
 	// receiving the message from the client either get request or post request
 	c = read(connfd, buff, sizeof(buff));
 	
@@ -338,8 +331,9 @@ void proxy_server_handler(int connfd){
     	
 	buff[c] = '\0';
 	strcpy(data,buff);
-	
+	strcpy(resend,buff);
 	// Extract the method and host from the request
+	
     	char method[16];
     	char host[256];
     	printf("%s",buff);
@@ -373,26 +367,54 @@ void proxy_server_handler(int connfd){
 	    int r = write(connfd, response, strlen(response));
 	    
  	    create_SSL_context_client();
-	    
-	    // Create an SSL connection object
+ 	    
+	    //Create an SSL connection object
 	    SSL *destination_ssl = SSL_new(ctx1);
+	    
+	    SSL_set_tlsext_host_name(destination_ssl, host);
+	    
 	    // Attach the SSL connection object to the socket file descriptor
 	    SSL_set_fd(destination_ssl, destination_sockfd);
 	    // Initiate SSL handshake
 	    if (SSL_connect(destination_ssl) == -1) {
-		ERR_print_errors_fp(stderr);
-		close(connfd);
-		exit(0);
+		/*ERR_print_errors_fp(stderr);*/
+		/*SSL_shutdown(destination_ssl);
+	    	SSL_free(destination_ssl);*/
+	    	close(destination_sockfd);
+	    	destination_sockfd = client_creation(port,host);
+	    
+	    	if(destination_sockfd == -1){
+	    		perror("socket");
+	        	close(connfd);
+	        	exit(0);
+	    	}
+	    	
+	    	
+		//printf("%s\n",resend);
+		write(destination_sockfd,resend,sizeof(resend));
+		read(destination_sockfd,resend,sizeof(resend));
+		//printf("%s\n",resend);
+		
+		SSL *destination_ssl = SSL_new(ctx1);
+		destination_ssl = SSL_new(ctx1);
+		SSL_set_fd(destination_ssl, destination_sockfd);
+		if (SSL_connect(destination_ssl) == -1) {
+			ERR_print_errors_fp(stderr);
+			close(connfd);
+			close(destination_sockfd);
+			exit(0);
+		}
 	    }
 	    
 	    
 	    
 	   extern char password[20];
-	   char *domain = host;
-	    
-	   extractSANandCN(destination_ssl,domain);
 	   
-	  
+	   char *domain = host;
+	   const unsigned char* names[15];
+	   names[0] = host;
+	    
+	   extractSANandCN(destination_ssl,names,1);
 	    
 	   char opensslCommand[256];
 	   snprintf(opensslCommand, sizeof(opensslCommand), "openssl x509 -req -in serverC.csr -CA ~/cert/myCA.pem -CAkey ~/cert/myCA.key -CAcreateserial -out serverOn.crt -days 825 -sha256 -extfile openssl_config.conf -passin pass:%s",password);
@@ -423,8 +445,7 @@ void proxy_server_handler(int connfd){
 		 close(destination_sockfd);
 		 return;
 	   }
-	 
-	    printf("helo\n");
+	   
 	    message_handler(ssl,destination_ssl,connfd,destination_sockfd);
 	    
 	    // Clean up
