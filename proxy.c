@@ -15,6 +15,7 @@
 #include <ctype.h>
 #include <time.h> 
 #include <openssl/ssl.h>
+#include <poll.h>
 #include "pass.h"
 #include <openssl/err.h>
 #include <openssl/bio.h>
@@ -25,9 +26,9 @@
 #define BACKLOG 10 
 #define PORT "8080"
 
-
 SSL_CTX* ctx;
 SSL_CTX* ctx1;
+
 //it helps us to handle all the dead process which was created with the fork system call.
 void generateOpenSSLConfig(const unsigned char** names,int n) {
     FILE *configFile = fopen("openssl_config.conf", "w");
@@ -42,10 +43,11 @@ void generateOpenSSLConfig(const unsigned char** names,int n) {
     fprintf(configFile, "keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment\n");
     fprintf(configFile, "subjectAltName = @alt_names\n");
     fprintf(configFile, "[alt_names]\n");
+    
     int i = 1;
     while(n--){
 	    if(names[n] != NULL){
-	    	printf("names[%d] - %s\n",n,names[n]);
+	    	//printf("names[%d] - %s\n",n,names[n]);
 	    	fprintf(configFile, "DNS.%d = %s\n",i++, names[n]);
 	    }
     }
@@ -101,6 +103,7 @@ void sigchld_handler(int s){
 	while(waitpid(-1,NULL,WNOHANG) > 0);
 	errno = saved_errno;
 }
+
 // give IPV4 or IPV6  based on the family set in the sa
 void *get_in_addr(struct sockaddr *sa){
 	if(sa->sa_family == AF_INET){
@@ -108,6 +111,7 @@ void *get_in_addr(struct sockaddr *sa){
 	}
 	return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
+
 void create_SSL_context(char* cert) {
     // Initialize OpenSSL
     SSL_library_init();
@@ -141,10 +145,12 @@ void create_SSL_context_client() {
         exit(0);
     }
 }
+
 void cleanup(SSL *ssl, int client_socket) {
     SSL_free(ssl);
     close(client_socket);
 }
+
 // this is the code for server creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
 // have to implement those in the upper layers.
 // this function will return socket descripter to the calling function.
@@ -200,6 +206,7 @@ int server_creation(){
 	} 
 	return sockfd;
 }
+
 //connection establishment with the client
 //return connection descriptor to the calling function
 int connection_accepting(int sockfd){
@@ -220,6 +227,7 @@ int connection_accepting(int sockfd){
 	
 	return connfd;
 }
+
 // reap all dead processes that are created as child processes
 void signal_handler(){
 	struct sigaction sa;
@@ -231,6 +239,7 @@ void signal_handler(){
 		exit(0);
 	}
 }
+
 // this is the code for client creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
 // have to implement those in the upper layers.
 // this function will return socket descripter to the calling function.
@@ -287,22 +296,44 @@ int client_creation(char* port,char* destination_server_addr){
 	
 	return sockfd;
 }
+
 void message_handler(SSL* ssl,SSL* destination_ssl,int client_socket,int destination_socket){
-	    // Forward the data between client and destination using SSL 
-	char data_buffer[204800];
-	ssize_t n;
-	n = SSL_read(ssl, data_buffer, sizeof(data_buffer));
+
+ 	    struct pollfd pollfds[2];
+	    pollfds[0].fd = client_socket;
+	    pollfds[0].events = POLLIN;
+	    pollfds[0].revents = 0;
+	    pollfds[1].fd = destination_socket;
+	    pollfds[1].events = POLLIN;
+	    pollfds[1].revents = 0;
+	    char data_buffer[204800];
+	    ssize_t n;
+	    while(1){
+	    
+	    	if(poll(pollfds,2,-1) == -1){
+			perror("poll");
+			exit(1);
+		}
 		
-	if (n <= 0) {
-	    return;
-	}
-	data_buffer[n]='\0';
-	SSL_write(destination_ssl, data_buffer, n);
-	
-	
-	while ((n = SSL_read(destination_ssl, data_buffer, sizeof(data_buffer))) > 0) {
-		SSL_write(ssl, data_buffer, n);
-	}
+	    	for(int fd = 0; fd < 2;fd++){
+	    		if((pollfds[fd].revents & POLLIN) == POLLIN && fd == 0){
+	    			n = SSL_read(ssl, data_buffer, sizeof(data_buffer));
+				if (n <= 0) {
+		    			return;
+				}
+				data_buffer[n]='\0';
+				n = SSL_write(destination_ssl, data_buffer, n);
+	    		}
+	    		if((pollfds[fd].revents & POLLIN) == POLLIN && fd == 1){
+	    			n = SSL_read(destination_ssl, data_buffer, sizeof(data_buffer));
+				if (n <= 0) {
+		    			return;
+				}
+				data_buffer[n]='\0';
+				n = SSL_write(ssl, data_buffer, n);
+	    		}
+	   	}
+	   }
 
 }
 
@@ -316,7 +347,9 @@ void message_handler_http(int client_socket,int destination_socket,char data[]){
 	while ((n = recv(destination_socket, data, 2048, 0)) > 0) {
 		send(client_socket, data, n, 0);
 	}
+	
 }
+
 //simple webserver with support to http methods such as get as well as post (basic functionalities)
 void proxy_server_handler(int connfd){
 	int c = 0;
@@ -433,7 +466,7 @@ void proxy_server_handler(int connfd){
 	   
 	   //create SSL context
 	   create_SSL_context("serverOn.crt");
-	    
+	   
 	   // Create an SSL connection
 	   SSL* ssl = SSL_new(ctx);
 	   SSL_set_fd(ssl, connfd);
@@ -458,7 +491,6 @@ void proxy_server_handler(int connfd){
 	    SSL_CTX_free(ctx1);
 	}
 	else{
-	
 		// Extract the target server information from the GET request
 	       char *host_start = strstr(buff, "Host: ") + 6;
 	       char *host_end = strstr(host_start, "\r\n");
@@ -508,7 +540,7 @@ int main(){
 		}
 		// fork is used for concurrent server.
 		// here fork is used to create child process to handle single client connection because if two clients needs to 
-		// connect to the server simultaneously if we do the client acceptence without fork if some client got connected then until 
+		// connect to the server simultaneously if we do the client acceptence without fork if some client got connected then until
 		// the client releases the server no one can able to connect to the server.
 		// to avoid this , used fork, that creates child process to handle the connection.
   
