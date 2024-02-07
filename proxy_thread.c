@@ -17,6 +17,7 @@
 #include <openssl/ssl.h>
 #include <poll.h>
 #include "pass.h"
+#include <pthread.h>
 #include <openssl/err.h>
 #include <openssl/bio.h>
 #include <openssl/x509.h>
@@ -26,8 +27,7 @@
 #define BACKLOG 10 
 #define PORT "8080"
 
-SSL_CTX* ctx;
-SSL_CTX* ctx1;
+pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
 
 //it helps us to handle all the dead process which was created with the fork system call.
 void generateOpenSSLConfig(const unsigned char** names,int n) {
@@ -98,11 +98,6 @@ void extractSANandCN(SSL* ssl,const unsigned char** names,int n) {
     X509_free(cert);
 }
 
-void sigchld_handler(int s){
-	int saved_errno = errno;
-	while(waitpid(-1,NULL,WNOHANG) > 0);
-	errno = saved_errno;
-}
 
 // give IPV4 or IPV6  based on the family set in the sa
 void *get_in_addr(struct sockaddr *sa){
@@ -112,8 +107,9 @@ void *get_in_addr(struct sockaddr *sa){
 	return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
-void create_SSL_context(char* cert) {
+SSL_CTX* create_SSL_context(char* cert) {
     // Initialize OpenSSL
+    SSL_CTX* ctx;
     SSL_library_init();
     OpenSSL_add_all_algorithms();
     SSL_load_error_strings();
@@ -132,10 +128,12 @@ void create_SSL_context(char* cert) {
         ERR_print_errors_fp(stderr);
         exit(0);
     }
+    return ctx;
 }
 
-void create_SSL_context_client() {
+SSL_CTX* create_SSL_context_client() {
     // Initialize OpenSSL
+    SSL_CTX* ctx1;
     SSL_library_init();
     SSL_load_error_strings();
     // Create a new SSL context
@@ -144,7 +142,9 @@ void create_SSL_context_client() {
         ERR_print_errors_fp(stderr);
         exit(0);
     }
+    return ctx1;
 }
+
 
 void cleanup(SSL *ssl, int client_socket) {
     SSL_free(ssl);
@@ -228,18 +228,6 @@ int connection_accepting(int sockfd){
 	return connfd;
 }
 
-// reap all dead processes that are created as child processes
-void signal_handler(){
-	struct sigaction sa;
-	sa.sa_handler = sigchld_handler; 
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
-	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-		perror("sigaction");
-		exit(0);
-	}
-}
-
 // this is the code for client creation. here i have used TCP instead of UDP because i need all the data without any loss. if we use UDP we
 // have to implement those in the upper layers.
 // this function will return socket descripter to the calling function.
@@ -267,13 +255,6 @@ int client_creation(char* port,char* destination_server_addr){
 		if(sockfd==-1){ 
 			perror("client: socket\n"); 
 			continue; 
-		}
-		
-		int yes = 1;
-		
-		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1){
-			perror("setsockopt");
-			exit(0);	
 		}
 		
 		// connect will help us to connect to the server with the addr given in arguments.
@@ -312,7 +293,7 @@ void message_handler(SSL* ssl,SSL* destination_ssl,int client_socket,int destina
 	    
 	    	if(poll(pollfds,2,-1) == -1){
 			perror("poll");
-			exit(1);
+			return;
 		}
 		
 	    	for(int fd = 0; fd < 2;fd++){
@@ -352,14 +333,16 @@ void message_handler_http(int client_socket,int destination_socket,char data[]){
 
 //simple webserver with support to http methods such as get as well as post (basic functionalities)
 void proxy_server_handler(int connfd){
+	SSL_CTX* ctx;
+	SSL_CTX* ctx1;
+
 	int c = 0;
 	char buff[2048],data[2048],resend[2048];
 	// receiving the message from the client either get request or post request
 	c = read(connfd, buff, sizeof(buff));
 	
 	if (c <= 0) {
-		close(connfd);
-		exit(0);
+		return;
     	}
     	
 	buff[c] = '\0';
@@ -390,8 +373,7 @@ void proxy_server_handler(int connfd){
 	    
 	     if(destination_sockfd == -1){
 	    	perror("socket");
-	        close(connfd);
-	        exit(0);
+	        return;
 	    }
 	    
 	    
@@ -399,7 +381,8 @@ void proxy_server_handler(int connfd){
 	    const char *response = "HTTP/1.1 200 Connection established\r\n\r\n";
 	    int r = write(connfd, response, strlen(response));
 	    
- 	    create_SSL_context_client();
+	    
+ 	    ctx1 = create_SSL_context_client();
  	    
 	    //Create an SSL connection object
 	    SSL *destination_ssl = SSL_new(ctx1);
@@ -418,8 +401,7 @@ void proxy_server_handler(int connfd){
 	    
 	    	if(destination_sockfd == -1){
 	    		perror("socket");
-	        	close(connfd);
-	        	exit(0);
+	        	return;
 	    	}
 	    	
 	    	
@@ -433,9 +415,8 @@ void proxy_server_handler(int connfd){
 		SSL_set_fd(destination_ssl, destination_sockfd);
 		if (SSL_connect(destination_ssl) == -1) {
 			ERR_print_errors_fp(stderr);
-			close(connfd);
 			close(destination_sockfd);
-			exit(0);
+			return;
 		}
 	    }
 	    
@@ -443,10 +424,15 @@ void proxy_server_handler(int connfd){
 	    
 	   extern char password[20];
 	   
-	   char *domain = host;
-	   const unsigned char* names[15];
+	  
+	   const unsigned char* names[300];
 	   names[0] = host;
-	    
+	   printf("\n#%s\n",names[0]);
+	   const unsigned char *domain = names[0];
+	   
+	   //locking the thread when moving to the critical region
+	   
+	   pthread_mutex_lock( &mutex1 );
 	   extractSANandCN(destination_ssl,names,1);
 	    
 	   char opensslCommand[256];
@@ -461,12 +447,10 @@ void proxy_server_handler(int connfd){
 
 	   printf("Certificate generated successfully for domain %s\n", domain); 
 	    
-	   char temp[100];
-	   sprintf(temp,"%s.crt",domain);
 	   
 	   //create SSL context
-	   create_SSL_context("serverOn.crt");
-	   
+	   ctx = create_SSL_context("serverOn.crt");
+           pthread_mutex_unlock( &mutex1 );	   
 	   // Create an SSL connection
 	   SSL* ssl = SSL_new(ctx);
 	   SSL_set_fd(ssl, connfd);
@@ -515,21 +499,33 @@ void proxy_server_handler(int connfd){
 	       
 	       if(destination_sockfd == -1){
 		    	perror("socket");
-		        close(connfd);
-		        exit(0);
+		        return;
 	       }
 	       
 	       message_handler_http(connfd,destination_sockfd,data);
 	       close(destination_sockfd);
 	}
 }
+
+// Function to handle a single client connection in a thread
+void* handle_client(void* connfd_ptr) {
+    int connfd = *((int*)connfd_ptr);
+    pthread_mutex_unlock( &mutex1 );
+    
+    proxy_server_handler(connfd);
+    
+    close(connfd);
+}
+
+
 int main(){ 
 	int sockfd,connfd;
+	pthread_t thread1;
+	int* connfd_ptr = (int*)malloc(sizeof(int));
 	
-	//server creation .
+	//server creation
 	sockfd = server_creation();
-	
-	signal_handler();	
+		
 	printf("server: waiting for connections...\n");
 	 
 	while(1){ 
@@ -538,22 +534,23 @@ int main(){
 		if(connfd == -1){
 			continue;
 		}
-		// fork is used for concurrent server.
-		// here fork is used to create child process to handle single client connection because if two clients needs to 
-		// connect to the server simultaneously if we do the client acceptence without fork if some client got connected then until
-		// the client releases the server no one can able to connect to the server.
-		// to avoid this , used fork, that creates child process to handle the connection.
-  
-		int fk=fork(); 
-		if (fk==0){ 
-			close(sockfd);
-			proxy_server_handler(connfd);
-			close(connfd);
-			exit(0);
-		} 
-		close(connfd);  
+		
+		// Allocate memory for connfd and pass it to the thread
+		pthread_mutex_lock( &mutex1 );
+		*connfd_ptr = connfd;
+		
+		if (pthread_create(&thread1, NULL, handle_client, (void*)connfd_ptr) != 0) {
+		    perror("pthread_create");
+		    close(connfd);
+		    continue;
+		}
+		
+		if (pthread_detach(thread1) != 0) {
+		    perror("pthread_detach");
+		}
 	}
 	close(sockfd); 
 	return 1;
 } 
+
 
