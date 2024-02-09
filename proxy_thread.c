@@ -245,11 +245,6 @@ int client_creation(char* port,char* destination_server_addr){
 		return -1;
 	}
 	
-	struct sockaddr_in proxy_addr;
-	memset(&proxy_addr,0,sizeof(proxy_addr));
-	proxy_addr.sin_family = AF_INET;
-	proxy_addr.sin_port = htons(8070);
-	proxy_addr.sin_addr.s_addr = INADDR_ANY;
 	for(p = servinfo; p!= NULL; p=p->ai_next){
 		sockfd=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
 		if(sockfd==-1){ 
@@ -287,7 +282,7 @@ void message_handler(SSL* ssl,SSL* destination_ssl,int client_socket,int destina
 	    pollfds[1].fd = destination_socket;
 	    pollfds[1].events = POLLIN;
 	    pollfds[1].revents = 0;
-	    char data_buffer[204800];
+	    char data_buffer[2592000];
 	    ssize_t n;
 	    while(1){
 	    
@@ -302,7 +297,9 @@ void message_handler(SSL* ssl,SSL* destination_ssl,int client_socket,int destina
 				if (n <= 0) {
 		    			return;
 				}
+				
 				data_buffer[n]='\0';
+				//printf("data from client is %s\n",data_buffer);
 				n = SSL_write(destination_ssl, data_buffer, n);
 	    		}
 	    		if((pollfds[fd].revents & POLLIN) == POLLIN && fd == 1){
@@ -310,7 +307,9 @@ void message_handler(SSL* ssl,SSL* destination_ssl,int client_socket,int destina
 				if (n <= 0) {
 		    			return;
 				}
+				
 				data_buffer[n]='\0';
+				//printf("data from server is %s\n",data_buffer);
 				n = SSL_write(ssl, data_buffer, n);
 	    		}
 	   	}
@@ -339,6 +338,7 @@ void proxy_server_handler(int connfd){
 	int c = 0;
 	char buff[2048],data[2048],resend[2048];
 	// receiving the message from the client either get request or post request
+	
 	c = read(connfd, buff, sizeof(buff));
 	
 	if (c <= 0) {
@@ -352,7 +352,7 @@ void proxy_server_handler(int connfd){
 	
     	char method[16];
     	char host[256];
-    	printf("%s",buff);
+    	//printf("%s",buff);
     	sscanf(buff, "%s %s", method, host);
     	
     	 if (strcmp(method, "CONNECT") == 0) {
@@ -427,8 +427,8 @@ void proxy_server_handler(int connfd){
 	  
 	   const unsigned char* names[300];
 	   names[0] = host;
-	   printf("\n#%s\n",names[0]);
-	   const unsigned char *domain = names[0];
+	   
+	  // const unsigned char *domain = names[0];
 	   
 	   //locking the thread when moving to the critical region
 	   
@@ -445,12 +445,13 @@ void proxy_server_handler(int connfd){
 		return;
 	   }
 
-	   printf("Certificate generated successfully for domain %s\n", domain); 
+	   //printf("Certificate generated successfully for domain %s\n", domain); 
 	    
 	   
 	   //create SSL context
 	   ctx = create_SSL_context("serverOn.crt");
-           pthread_mutex_unlock( &mutex1 );	   
+           pthread_mutex_unlock( &mutex1 );	
+              
 	   // Create an SSL connection
 	   SSL* ssl = SSL_new(ctx);
 	   SSL_set_fd(ssl, connfd);
@@ -492,8 +493,8 @@ void proxy_server_handler(int connfd){
 	 	}	
 
 	       // Print target server information
-	       printf("Target Host: %s\n", host_start);
-	       printf("Target URL: %s\n", host);
+	       //printf("Target Host: %s\n", host_start);
+	       //printf("Target URL: %s\n", host);
 	      
 	       int destination_sockfd = client_creation(port,host_start);
 	       
@@ -517,12 +518,20 @@ void* handle_client(void* connfd_ptr) {
     close(connfd);
 }
 
+void sigpipe_handler(int signo) {
+    // Exit the current thread
+    pthread_exit(NULL);
+}
+
 
 int main(){ 
 	int sockfd,connfd;
 	pthread_t thread1;
 	int* connfd_ptr = (int*)malloc(sizeof(int));
 	
+	//ignoring SIGPIPE signal
+	// Register the SIGPIPE signal handler
+   	signal(SIGPIPE, sigpipe_handler);
 	//server creation
 	sockfd = server_creation();
 		
